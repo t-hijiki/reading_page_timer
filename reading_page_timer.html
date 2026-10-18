@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f5f5f7">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="読書タイマー">
+  <title>読書タイマー</title>
+  <style>
+    :root{--bg:#f5f5f7;--card:#fff;--text:#1d1d1f;--sub:#6e6e73;--accent:#0071e3;--border:#e5e5ea}
+    *{box-sizing:border-box}
+    body{margin:0;min-height:100vh;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue","Hiragino Sans","Yu Gothic",sans-serif}
+    main{max-width:520px;margin:0 auto;padding:24px 18px 44px}
+    h1{text-align:center;font-size:28px;margin:8px 0 18px}
+    .card{background:var(--card);border:1px solid var(--border);border-radius:20px;padding:22px;margin-bottom:16px}
+    .label{text-align:center;color:var(--sub);font-size:14px;margin-bottom:6px}
+    .countdown{text-align:center;font-size:72px;font-weight:750;letter-spacing:-2px;line-height:1.05}
+    .elapsed{text-align:center;font-size:34px;font-weight:650;line-height:1.2}
+    .settings{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}
+    label{display:block;font-size:13px;color:var(--sub)}
+    input{width:100%;font:inherit;font-size:20px;margin-top:6px;padding:12px;border-radius:12px;border:1px solid var(--border);background:#fff;color:var(--text)}
+    .row{display:flex;gap:10px;flex-wrap:wrap;margin-top:14px}
+    button{min-height:48px;border:0;border-radius:14px;font:inherit;font-size:17px;font-weight:700;padding:13px 16px;cursor:pointer;flex:1}
+    button:disabled{opacity:.45;cursor:default}
+    .primary{background:var(--accent);color:white}
+    .secondary{background:#e9e9ee;color:var(--text)}
+    .page-done{width:100%;min-height:74px;font-size:22px;margin-top:14px;background:var(--accent);color:white}
+    .status{text-align:center;margin-top:12px;color:var(--sub);font-size:13px;min-height:20px}
+    .note{font-size:12px;line-height:1.6;color:var(--sub);margin-top:8px}
+    @media (max-width:360px){.countdown{font-size:60px}.elapsed{font-size:30px}}
+  </style>
+</head>
+<body>
+<main>
+  <h1>読書タイマー</h1>
+
+  <section class="card">
+    <div class="label">このページの残り時間</div>
+    <div id="countdown" class="countdown" aria-live="polite">01:00</div>
+
+    <div class="settings">
+      <label>分
+        <input id="minutes" type="number" inputmode="numeric" min="0" max="59" value="1">
+      </label>
+      <label>秒
+        <input id="seconds" type="number" inputmode="numeric" min="0" max="59" value="0">
+      </label>
+    </div>
+
+    <div class="row">
+      <button id="startPause" type="button" class="primary">開始</button>
+      <button id="resetSession" type="button" class="secondary">最初から</button>
+    </div>
+
+    <button id="pageDone" type="button" class="page-done" disabled>ページ読了 → 次の計測へ</button>
+    <div id="status" class="status">開始を押すと計測します</div>
+  </section>
+
+  <section class="card">
+    <div class="label">読み始めてからの経過時間</div>
+    <div id="elapsed" class="elapsed">00:00:00</div>
+  </section>
+
+  <p class="note">
+    制限時間になると音を鳴らし、その時点から次のページ分の計測を自動で始めます。
+    早く読み終えた場合は「ページ読了」を押してください。経過時間はリセットされません。
+  </p>
+</main>
+
+<script>
+(() => {
+  const countdownEl = document.getElementById('countdown');
+  const elapsedEl = document.getElementById('elapsed');
+  const minutesEl = document.getElementById('minutes');
+  const secondsEl = document.getElementById('seconds');
+  const startPauseBtn = document.getElementById('startPause');
+  const resetBtn = document.getElementById('resetSession');
+  const pageDoneBtn = document.getElementById('pageDone');
+  const statusEl = document.getElementById('status');
+
+  let running = false;
+  let durationMs = 60000;
+  let remainingMs = durationMs;
+  let pageDeadline = 0;
+  let elapsedAccumMs = 0;
+  let elapsedStartedAt = 0;
+  let timerId = null;
+  let audioCtx = null;
+
+  function clampInt(value, min, max) {
+    const n = Number.parseInt(value, 10);
+    if (!Number.isFinite(n)) return min;
+    return Math.max(min, Math.min(max, n));
+  }
+
+  function readDuration() {
+    const m = clampInt(minutesEl.value, 0, 59);
+    const s = clampInt(secondsEl.value, 0, 59);
+    minutesEl.value = m;
+    secondsEl.value = s;
+    const total = (m * 60 + s) * 1000;
+    if (total < 5000) {
+      statusEl.textContent = '制限時間は5秒以上にしてください';
+      return null;
+    }
+    return total;
+  }
+
+  function mmss(ms) {
+    const total = Math.max(0, Math.ceil(ms / 1000));
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    return String(m).padStart(2,'0') + ':' + String(s).padStart(2,'0');
+  }
+
+  function hhmmss(ms) {
+    const total = Math.max(0, Math.floor(ms / 1000));
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    return [h,m,s].map(v => String(v).padStart(2,'0')).join(':');
+  }
+
+  function currentElapsed(now = performance.now()) {
+    return elapsedAccumMs + (running ? now - elapsedStartedAt : 0);
+  }
+
+  function ensureAudio() {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      if (!audioCtx) audioCtx = new AC();
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+    } catch (_) {}
+  }
+
+  function beep() {
+    if (!audioCtx) return;
+    const start = audioCtx.currentTime;
+    [0, 0.28, 0.56].forEach(offset => {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = 880;
+      gain.gain.setValueAtTime(0.0001, start + offset);
+      gain.gain.exponentialRampToValueAtTime(0.28, start + offset + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + offset + 0.20);
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start(start + offset);
+      osc.stop(start + offset + 0.22);
+    });
+  }
+
+  function render(now = performance.now()) {
+    if (running) {
+      remainingMs = pageDeadline - now;
+      if (remainingMs <= 0) {
+        beep();
+        pageDeadline = now + durationMs;
+        remainingMs = durationMs;
+        statusEl.textContent = '時間です。次のページの計測を開始しました';
+      }
+    }
+    countdownEl.textContent = mmss(remainingMs);
+    elapsedEl.textContent = hhmmss(currentElapsed(now));
+  }
+
+  function startLoop() {
+    clearInterval(timerId);
+    timerId = setInterval(() => render(), 100);
+  }
+
+  function stopLoop() {
+    clearInterval(timerId);
+    timerId = null;
+  }
+
+  startPauseBtn.addEventListener('click', () => {
+    ensureAudio();
+    const now = performance.now();
+
+    if (!running) {
+      const newDuration = readDuration();
+      if (newDuration === null) return;
+
+      if (elapsedAccumMs === 0 && remainingMs === durationMs) {
+        durationMs = newDuration;
+        remainingMs = durationMs;
+      } else {
+        durationMs = newDuration;
+        if (remainingMs > durationMs) remainingMs = durationMs;
+      }
+
+      running = true;
+      elapsedStartedAt = now;
+      pageDeadline = now + remainingMs;
+      startPauseBtn.textContent = '一時停止';
+      pageDoneBtn.disabled = false;
+      minutesEl.disabled = true;
+      secondsEl.disabled = true;
+      statusEl.textContent = '計測中';
+      startLoop();
+      render(now);
+    } else {
+      remainingMs = Math.max(0, pageDeadline - now);
+      elapsedAccumMs += now - elapsedStartedAt;
+      running = false;
+      stopLoop();
+      startPauseBtn.textContent = '再開';
+      pageDoneBtn.disabled = true;
+      minutesEl.disabled = false;
+      secondsEl.disabled = false;
+      statusEl.textContent = '一時停止中';
+      render(now);
+    }
+  });
+
+  pageDoneBtn.addEventListener('click', () => {
+    if (!running) return;
+    ensureAudio();
+    const now = performance.now();
+    pageDeadline = now + durationMs;
+    remainingMs = durationMs;
+    statusEl.textContent = '次のページの計測を開始しました';
+    render(now);
+  });
+
+  resetBtn.addEventListener('click', () => {
+    stopLoop();
+    running = false;
+    elapsedAccumMs = 0;
+    elapsedStartedAt = 0;
+    const newDuration = readDuration();
+    durationMs = newDuration ?? 60000;
+    remainingMs = durationMs;
+    pageDeadline = 0;
+    startPauseBtn.textContent = '開始';
+    pageDoneBtn.disabled = true;
+    minutesEl.disabled = false;
+    secondsEl.disabled = false;
+    statusEl.textContent = '開始を押すと計測します';
+    render();
+  });
+
+  function updatePreview() {
+    if (running) return;
+    const d = readDuration();
+    if (d !== null) {
+      durationMs = d;
+      remainingMs = d;
+      statusEl.textContent = '開始を押すと計測します';
+      render();
+    }
+  }
+
+  minutesEl.addEventListener('input', updatePreview);
+  secondsEl.addEventListener('input', updatePreview);
+
+  render();
+})();
+</script>
+</body>
+</html>
